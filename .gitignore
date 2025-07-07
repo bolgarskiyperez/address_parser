@@ -1,0 +1,5 @@
+target/
+*.rs.bk
+*.log
+.env
+addresses_with_coordinates.json
