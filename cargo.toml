@@ -14,3 +14,5 @@ url = "2.4"
 anyhow = "1.0"
 dotenv = "0.15"
 urlencoding = "2.1"
+html2text = "0.3"
+

@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
-use regex::Regex;
 use reqwest::Client;
-use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Write;
 use std::time::Duration;
+use regex::Regex;
+use scraper::{Html, Selector};
+
 
 #[derive(Debug, Serialize, Deserialize)]
 struct AddressLocation {
@@ -91,50 +92,32 @@ impl AddressParser {
         Ok(html)
     }
 
-    fn extract_addresses(&self, html: &str) -> Result<Vec<String>> {
+    fn extract_addresses_manual(&self, html: &str) -> Result<Vec<String>> {
         let document = Html::parse_document(html);
-        let selector = Selector::parse("span").unwrap();
+        let content_selector = Selector::parse("div.node__content").unwrap();
+        let p_selector = Selector::parse("p").unwrap();
 
         let mut addresses = Vec::new();
 
-        // Паттерн для поиска адресов
-        let address_patterns = vec![
-            r"(?:ул\.|пр-т|пер\.|пл\.|бульвар|аллея)\s+[А-Яа-яёЁ\s-]+,?\s*(?:дом[аы]?|д\.?)?\s*[\dА-Яа-яёЁ\s,()/\-]+",
-            r"(?:ул\.|пр-т|пер\.|пл\.|бульвар|аллея)\s+[А-Яа-яёЁ\s-]+,?\s*\d+[А-Яа-яёЁ\d\s,()/\-]*",
-        ];
+        if let Some(content_div) = document.select(&content_selector).next() {
+            for p in content_div.select(&p_selector) {
+                // Получаем внутренний HTML <p>, чтобы сохранить <br> как разделитель
+                let p_html = p.inner_html();
 
-        let combined_pattern = address_patterns.join("|");
-        let regex = Regex::new(&combined_pattern).unwrap();
+                // Разбиваем по <br>
+                for line in p_html.split("<br>") {
+                    // Убираем все теги из строки (например, &nbsp;)
+                    let text = html2text::from_read(line.as_bytes(), usize::MAX)
+                        .replace("\n", "")
+                        .trim()
+                        .to_string();
 
-        for element in document.select(&selector) {
-            let text = element.text().collect::<Vec<_>>().join(" ");
-
-            for cap in regex.find_iter(&text) {
-                let address = cap.as_str().trim();
-                if !address.is_empty() && address.len() > 10 {
-                    let full_address = if address.starts_with("Калининград") {
-                        address.to_string()
-                    } else {
-                        format!("Калининград, {}", address)
-                    };
-                    addresses.push(full_address);
-                }
-            }
-        }
-
-        // Дополнительное извлечение адресов по строкам
-        let lines: Vec<&str> = html.lines().collect();
-        for line in lines {
-            if line.contains("ул.") || line.contains("пр-т") || line.contains("пер.") {
-                for cap in regex.find_iter(line) {
-                    let address = cap.as_str().trim();
-                    if !address.is_empty() && address.len() > 10 {
-                        let full_address = if address.starts_with("Калининград") {
-                            address.to_string()
-                        } else {
-                            format!("Калининград, {}", address)
-                        };
-                        addresses.push(full_address);
+                    if text.starts_with("- ") {
+                        // Удаляем "- " в начале
+                        let addr = text[2..].trim().to_string();
+                        if !addr.is_empty() {
+                            addresses.push(format!("Калининград, {}", addr));
+                        }
                     }
                 }
             }
@@ -180,30 +163,8 @@ impl AddressParser {
         if let Some(feature) = geo_response.response.geo_object_collection.feature_member.first() {
             let coords: Vec<&str> = feature.geo_object.point.pos.split_whitespace().collect();
             if coords.len() == 2 {
-                let longitude = match coords[0].parse::<f64>() {
-                    Ok(lon) => Some(lon),
-                    Err(e) => {
-                        return Ok(AddressLocation {
-                            address: address.to_string(),
-                            latitude: None,
-                            longitude: None,
-                            formatted_address: None,
-                            error: Some(format!("Failed to parse longitude: {}", e)),
-                        });
-                    }
-                };
-                let latitude = match coords[1].parse::<f64>() {
-                    Ok(lat) => Some(lat),
-                    Err(e) => {
-                        return Ok(AddressLocation {
-                            address: address.to_string(),
-                            latitude: None,
-                            longitude: None,
-                            formatted_address: None,
-                            error: Some(format!("Failed to parse latitude: {}", e)),
-                        });
-                    }
-                };
+                let longitude = coords[0].parse::<f64>().ok();
+                let latitude = coords[1].parse::<f64>().ok();
 
                 return Ok(AddressLocation {
                     address: address.to_string(),
@@ -242,7 +203,6 @@ impl AddressParser {
                 }
             }
 
-            // Задержка между запросами для соблюдения лимитов API
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
@@ -266,24 +226,22 @@ impl AddressParser {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    dotenv::dotenv().ok(); // Добавьте эту строку
+    dotenv::dotenv().ok();
 
-    // Замените на ваш API ключ Яндекс.Карт
     let yandex_api_key = std::env::var("YANDEX_API_KEY")
         .context("YANDEX_API_KEY environment variable not set. Please set it before running the program.")?;
 
     let parser = AddressParser::new(yandex_api_key)?;
 
-    // URL страницы для парсинга
     let url = "https://rspoko.ru/cbor-othodov-plastika-ot-naseleniya";
 
     println!("Fetching page content...");
     let html = parser.fetch_page(url).await?;
 
     println!("Extracting addresses...");
-    let addresses = parser.extract_addresses(&html)?;
+    let addresses = parser.extract_addresses_manual(&html)?;
 
-    println!("Found {} addresses", addresses.len());
+    println!("Found {} addresses:", addresses.len());
     for (i, address) in addresses.iter().enumerate() {
         println!("{}. {}", i + 1, address);
     }
